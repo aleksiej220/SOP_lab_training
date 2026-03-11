@@ -242,3 +242,106 @@ sigfillset(&mask);
 sigdelset(&mask, SIGUSR1);
 sigsuspend(&mask); // Czeka tylko na SIGUSR1
 ```
+
+---
+
+## 6. PIPE i FIFO (Potoki) — komunikacja procesów
+
+### PIPE (anonimowy potok) — `pipe()`
+Potok anonimowy to para deskryptorów pliku (odczyt/zapis) działająca **w obrębie procesu i jego potomków** (np. po `fork()`), typowo do spięcia procesów jak w `cmd1 | cmd2`.
+
+Wymaga nagłówków: `<unistd.h>`, `<sys/types.h>`, `<sys/wait.h>` (dla `wait`), `<errno.h>`.
+
+Najważniejsze zachowania:
+- `read()` **blokuje**, gdy brak danych (dopóki ktoś nie zapisze).
+- `read()` zwraca **0 (EOF)**, gdy **wszyscy** piszący zamkną koniec zapisu.
+- `write()` może blokować, gdy bufor potoku jest pełny.
+- Zapis do potoku bez czytelnika powoduje `SIGPIPE` (a `write()` zwraca `-1`, `errno = EPIPE`).
+- Zapisy są atomowe do rozmiaru `PIPE_BUF` (większe mogą się przeplatać).
+
+Minimalny wzorzec z `dup2()` (dziecko czyta ze stdin podpiętego do potoku):
+
+```c
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <stdlib.h>
+#include <stdio.h>
+
+int main(void) {
+    int fds[2];
+    if (pipe(fds) == -1) { perror("pipe"); return 1; }
+
+    pid_t pid = fork();
+    if (pid == -1) { perror("fork"); return 1; }
+
+    if (pid == 0) {
+        close(fds[1]);
+        if (dup2(fds[0], STDIN_FILENO) == -1) { perror("dup2"); _exit(127); }
+        close(fds[0]);
+
+        execlp("wc", "wc", "-c", (char *)NULL);
+        perror("execlp");
+        _exit(127);
+    }
+
+    close(fds[0]);
+    const char *msg = "Ala ma kota\n";
+    (void)write(fds[1], msg, 11);
+    close(fds[1]); // ważne: zamknięcie końca zapisu => dziecko dostanie EOF
+
+    wait(NULL);
+    return 0;
+}
+```
+
+Typowa pułapka: **zawsze zamykaj nieużywane końce** potoku w każdym procesie (inaczej czytający może nigdy nie dostać EOF).
+
+### FIFO (potok nazwany) — `mkfifo()` / `mkfifo` (shell)
+FIFO to specjalny plik w systemie plików, dzięki czemu **niespokrewnione procesy** mogą się komunikować przez znaną ścieżkę.
+
+Wymaga nagłówków: `<sys/stat.h>`, `<fcntl.h>`, `<unistd.h>`, `<errno.h>`.
+
+Najważniejsze zachowania:
+- `open(path, O_RDONLY)` blokuje, dopóki ktoś nie otworzy do zapisu (chyba że `O_NONBLOCK`).
+- `open(path, O_WRONLY)` blokuje, dopóki nie ma czytelnika (lub `-1`/`ENXIO` przy `O_NONBLOCK`).
+- `read()` zwraca **0 (EOF)**, gdy wszyscy piszący zamkną FIFO.
+
+Shell:
+```sh
+mkfifo myfifo
+
+# terminal 1 (czytelnik)
+cat < myfifo
+
+# terminal 2 (pisarz)
+echo "hello" > myfifo
+
+rm myfifo
+```
+
+C (prosto: tworzenie i zapis; odczyt analogicznie):
+```c
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <stdio.h>
+
+int main(void) {
+    const char *path = "myfifo";
+
+    if (mkfifo(path, 0666) == -1) {
+        perror("mkfifo");
+        // jeżeli już istnieje: rozważ obsłużenie EEXIST
+    }
+
+    int fd = open(path, O_WRONLY); // zablokuje do czasu aż pojawi się czytelnik
+    if (fd == -1) { perror("open"); return 1; }
+
+    (void)write(fd, "hello\n", 6);
+    close(fd);
+    return 0;
+}
+```
+
+Wskazówka: jeżeli potrzebujesz trybu nieblokującego/obsługi wielu źródeł, użyj `O_NONBLOCK` i `poll()`/`select()`.
