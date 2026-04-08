@@ -94,6 +94,24 @@ typedef struct {
     int process_count;
     int initialized;
 } SharedData;
+int robust_mutex_lock(pthread_mutex_t *mutex)
+{
+    int ret = pthread_mutex_lock(mutex);
+
+    if (ret == EOWNERDEAD) {
+        printf("Poprzedni właściciel mutexa umarł!\n");
+
+        // napraw dane współdzielone jeśli trzeba
+        //repair_shared_state();
+
+        // oznacz mutex jako ponownie spójny - BARDZO WAŻNE
+        pthread_mutex_consistent(mutex);
+    }
+    else if (ret != 0) {
+        perror("pthread_mutex_lock");
+        exit(1);
+    }
+}
 int main(int argc, char* argv[])
 {
     int a = atoi(argv[1]);
@@ -130,6 +148,7 @@ int main(int argc, char* argv[])
                 pthread_mutexattr_t attr;
                 pthread_mutexattr_init(&attr);
                 pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
+                pthread_mutexattr_setrobust(&attr, PTHREAD_MUTEX_ROBUST);
                 pthread_mutex_init(&(shared->mutex), &attr);
                 shared->process_count = 1;
                 shared->initialized = 1;
